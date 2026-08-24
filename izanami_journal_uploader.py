@@ -29,7 +29,7 @@ except ImportError:
     HAVE_PYSTRAY = False
 
 CONFIG_FILE = os.path.expanduser("~/.izanami_journal_uploader.json")
-CURRENT_VERSION = "2.6.0"
+CURRENT_VERSION = "2.6.1"
 VERSION_CHECK_URL = "https://www.irishraven.com/api/version"
 
 # Canonical EDAstro 16-Point Boundary (Region #7 - Izanami)
@@ -54,11 +54,45 @@ IZANAMI_POLYGON_XZ = [
 IZANAMI_Y_MIN = -3500.0
 IZANAMI_Y_MAX = 3500.0
 
-def is_in_izanami(coords):
+COORDS_CACHE = {}
+
+def check_coordinate_with_server(coords, server_url, timeout=2.0):
+    """ Offloads coordinate spatial boundary evaluation to the main backend connection """
+    if not coords or len(coords) < 3 or not server_url:
+        return None
+    try:
+        cache_key = (round(float(coords[0]), 1), round(float(coords[1]), 1), round(float(coords[2]), 1))
+        if cache_key in COORDS_CACHE:
+            return COORDS_CACHE[cache_key]
+
+        payload = json.dumps({
+            "x": float(coords[0]),
+            "y": float(coords[1]),
+            "z": float(coords[2])
+        }).encode('utf-8')
+        url = server_url.rstrip('/') + '/api/spatial/check_boundary'
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            is_inside = bool(data.get('is_in_izanami', False))
+            COORDS_CACHE[cache_key] = is_inside
+            return is_inside
+    except Exception:
+        return None
+
+def is_in_izanami(coords, server_url=None):
     """
-    Checks if 3D galactic coordinates [x, y, z] are within Izanami (Galactic Region #7)
-    using Ray-Casting Point-in-Polygon against canonical EDAstro boundaries.
+    Checks if 3D galactic coordinates [x, y, z] are within Izanami (Galactic Region #7).
+    First attempts to offload to the authoritative main backend connection.
+    Falls back gracefully to canonical EDAstro 16-point 3D polygon.
     """
+    if not coords or not isinstance(coords, (list, tuple)) or len(coords) < 3:
+        return False
+    
+    if server_url:
+        res = check_coordinate_with_server(coords, server_url)
+        if res is not None:
+            return res
     if not coords or not isinstance(coords, (list, tuple)) or len(coords) < 3:
         return False
     try:
@@ -342,6 +376,9 @@ class IzanamiSyncApp:
         btn_update_cnt = ttk.Button(cnt_row, text="🔢 Update System Count", style="Cyan.TButton", command=self.update_active_boxel_system_count)
         btn_update_cnt.pack(side=tk.LEFT, padx=6)
 
+        btn_3d_exp = ttk.Button(cnt_row, text="🧊 3D Boxel Explorer", style="Secondary.TButton", command=self.open_3d_boxel_explorer)
+        btn_3d_exp.pack(side=tk.LEFT, padx=6)
+
         self.btn_mark_complete = ttk.Button(
             boxel_action_frame, 
             text="✔ Mark Current Boxel Complete", 
@@ -417,13 +454,30 @@ class IzanamiSyncApp:
             self.settings_panel.pack_forget()
             self.btn_cog_settings.config(text="⚙️ Settings")
 
+    def open_3d_boxel_explorer(self):
+        base_url = self.server_url.get().strip().rstrip('/')
+        sec, sub, mass, _ = parse_system_to_boxel(self.current_system.get())
+        if sec and sub and mass:
+            url = f"{base_url}/boxel_explorer?sector={urllib.parse.quote(sec)}&boxel={urllib.parse.quote(sub)}+{urllib.parse.quote(mass)}"
+        else:
+            url = f"{base_url}/boxel_explorer"
+        try:
+            webbrowser.open_new(url)
+            self.update_status("Launched standalone 3D Boxel Explorer in browser.", 100)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open browser: {e}")
+
     def on_boxel_changed(self, *args):
         b = self.current_boxel.get()
         if b and b != "None Detected":
             self.btn_mark_complete.config(text=f"✔ Mark Current Boxel Complete ({b})")
             sec, sub, mass, idx = parse_system_to_boxel(self.current_system.get())
             if idx is not None and idx >= 0:
-                self.boxel_system_count.set(str(max(1, idx + 1)))
+                try:
+                    curr_val = int(self.boxel_system_count.get())
+                except Exception:
+                    curr_val = 1
+                self.boxel_system_count.set(str(max(curr_val, idx + 1)))
         else:
             self.btn_mark_complete.config(text="✔ Mark Current Boxel Complete")
 
@@ -542,7 +596,7 @@ class IzanamiSyncApp:
                                     sys_addr = ev.get("SystemAddress")
 
                                     if sys_name and coords:
-                                        in_iz = is_in_izanami(coords)
+                                        in_iz = is_in_izanami(coords, self.server_url.get().strip())
                                         z_val = coords[2] if len(coords) >= 3 else 0
 
                                         if not in_iz:
@@ -559,7 +613,13 @@ class IzanamiSyncApp:
                                             boxel_fmt = f"{sec} {sub} {mass}"
                                             self.root.after(0, lambda b=boxel_fmt: self.current_boxel.set(b))
                                             if idx is not None:
-                                                self.root.after(0, lambda i=idx: self.boxel_system_count.set(str(max(1, i + 1))))
+                                                def _upd_c(i=idx):
+                                                    try:
+                                                        cv = int(self.boxel_system_count.get())
+                                                    except Exception:
+                                                        cv = 1
+                                                    self.boxel_system_count.set(str(max(cv, i + 1)))
+                                                self.root.after(0, _upd_c)
 
                                         pending_jump = {
                                             "event": event_type,
@@ -689,7 +749,7 @@ class IzanamiSyncApp:
                 s_addr = v.get("SystemAddress")
                 coords = v.get("StarPos")
                 has_fss = (s_addr and s_addr in fss_completed_systems) or (s_name and s_name in fss_completed_names)
-                in_iz = is_in_izanami(coords)
+                in_iz = is_in_izanami(coords, self.server_url.get().strip())
                 if has_fss and in_iz:
                     confirmed_events.append(v)
 
