@@ -14,7 +14,11 @@ import time
 import glob
 import threading
 import webbrowser
+import platform
+import shutil
+import subprocess
 import urllib.request
+import urllib.parse
 import urllib.error
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -29,7 +33,7 @@ except ImportError:
     HAVE_PYSTRAY = False
 
 CONFIG_FILE = os.path.expanduser("~/.izanami_journal_uploader.json")
-CURRENT_VERSION = "2.6.1"
+CURRENT_VERSION = "2.6.2"
 VERSION_CHECK_URL = "https://www.irishraven.com/api/version"
 
 # Canonical EDAstro 16-Point Boundary (Region #7 - Izanami)
@@ -458,14 +462,55 @@ class IzanamiSyncApp:
         base_url = self.server_url.get().strip().rstrip('/')
         sec, sub, mass, _ = parse_system_to_boxel(self.current_system.get())
         if sec and sub and mass:
-            url = f"{base_url}/boxel_explorer?sector={urllib.parse.quote(sec)}&boxel={urllib.parse.quote(sub)}+{urllib.parse.quote(mass)}"
+            url = f"{base_url}/boxel_explorer?sector={urllib.parse.quote(sec)}&jump={urllib.parse.quote(sec)}+{urllib.parse.quote(sub)}+{urllib.parse.quote(mass)}0"
         else:
             url = f"{base_url}/boxel_explorer"
+
+        opened = False
+        # Try launching as a dedicated, standalone widget app window (no URL bar, no tabs)
         try:
-            webbrowser.open_new(url)
-            self.update_status("Launched standalone 3D Boxel Explorer in browser.", 100)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open browser: {e}")
+            candidates = []
+            if platform.system() == "Windows":
+                candidates = [
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                ]
+                for name in ["msedge", "chrome", "brave"]:
+                    p = shutil.which(name)
+                    if p and p not in candidates:
+                        candidates.append(p)
+            elif platform.system() == "Darwin":
+                candidates = [
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+                ]
+            else:
+                for name in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"]:
+                    p = shutil.which(name)
+                    if p:
+                        candidates.append(p)
+
+            for exe in candidates:
+                if exe and os.path.exists(exe):
+                    subprocess.Popen([exe, f"--app={url}", "--window-size=1200,820"])
+                    opened = True
+                    self.update_status("Launched 3D Boxel Explorer widget window.", 100)
+                    break
+        except Exception:
+            opened = False
+
+        if not opened:
+            try:
+                webbrowser.open_new(url)
+                self.update_status("Launched standalone 3D Boxel Explorer in browser.", 100)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to open explorer: {e}")
 
     def on_boxel_changed(self, *args):
         b = self.current_boxel.get()
