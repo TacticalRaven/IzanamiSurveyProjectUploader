@@ -377,7 +377,7 @@ class IzanamiSyncApp:
         self.sys_count_spin = ttk.Spinbox(cnt_row, from_=0, to_=99999, textvariable=self.boxel_system_count, width=8)
         self.sys_count_spin.pack(side=tk.LEFT, padx=4)
 
-        btn_update_cnt = ttk.Button(cnt_row, text="🔢 Update System Count", style="Cyan.TButton", command=self.update_active_boxel_system_count)
+        btn_update_cnt = ttk.Button(cnt_row, text="🔢 Update Total System Count", style="Cyan.TButton", command=self.update_active_boxel_system_count)
         btn_update_cnt.pack(side=tk.LEFT, padx=6)
 
         btn_3d_exp = ttk.Button(cnt_row, text="🧊 3D Boxel Explorer", style="Secondary.TButton", command=self.open_3d_boxel_explorer)
@@ -416,9 +416,6 @@ class IzanamiSyncApp:
 
         btn_submit_notexist = ttk.Button(notexist_btn_row, text="🚫 Mark Pasted as Doesn't Exist", style="Red.TButton", command=self.submit_pasted_not_exist)
         btn_submit_notexist.pack(side=tk.LEFT, padx=(0, 4))
-
-        btn_mark_curr_notexist = ttk.Button(notexist_btn_row, text="🚫 Mark Current Boxel (0/0)", style="Dark.TButton", command=self.mark_current_boxel_not_exist)
-        btn_mark_curr_notexist.pack(side=tk.LEFT, padx=4)
 
         btn_paste_clip = ttk.Button(notexist_btn_row, text="📋 Paste Clip", style="Dark.TButton", command=self.paste_clipboard_to_notexist)
         btn_paste_clip.pack(side=tk.RIGHT, padx=2)
@@ -834,17 +831,17 @@ class IzanamiSyncApp:
 
         sec, sub, mass, _ = parse_system_to_boxel(self.current_system.get())
         if not sec or not sub or not mass:
-            m = re.match(r"^(.*?)\s+([a-zA-Z]{2}-[a-zA-Z])\s+(.+)$", boxel_str)
+            m = re.match(r"^(.*?)\s+([a-zA-Z]{2}-[a-zA-Z])\s+([a-hA-H]\d*-?\d*)", boxel_str)
             if not m:
                 messagebox.showerror("Invalid Format", f"Unable to parse boxel: {boxel_str}")
                 return
-            sec = m.group(1).title()
-            sub = m.group(2).upper()
-            mass = m.group(3).upper()
+            sec = m.group(1).strip().title()
+            sub = m.group(2).strip().upper()
+            mass = m.group(3).strip().upper()
 
         key = self.api_key.get().strip()
         if not key:
-            messagebox.showerror("API Key Missing", "API Key is required to update system count. Click ⚙ Settings.")
+            messagebox.showerror("API Key Missing", "API Key is required to update total system count. Click ⚙ Settings.")
             return
 
         tot = self.boxel_system_count.get().strip()
@@ -860,18 +857,27 @@ class IzanamiSyncApp:
             "sector_name": sec,
             "subsector_code": sub,
             "mass_code": mass,
-            "total_systems": tot_int
+            "total_systems": tot_int,
+            "assigned_cmdr": self.active_cmdr.get()
         }).encode('utf-8')
 
         def _update_count():
-            self.update_status(f"Updating system count for {sec} {sub} {mass} to {tot_int}...", 50)
+            self.update_status(f"Updating total system count for {sec} {sub} {mass} to {tot_int}...", 50)
             req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     res = json.loads(resp.read().decode('utf-8'))
                     msg = res.get("msg", "Count updated.")
                     self.update_status(f"✅ {msg}", 100)
-                    self.root.after(0, lambda: messagebox.showinfo("System Count Updated", f"✅ {sec} {sub} {mass} total systems updated to {tot_int}!"))
+                    self.root.after(0, lambda: messagebox.showinfo("Total Systems Updated", f"✅ {sec} {sub} {mass} total systems updated to {tot_int}!"))
+            except urllib.error.HTTPError as e:
+                try:
+                    err_body = json.loads(e.read().decode('utf-8'))
+                    err_msg = err_body.get("detail", str(e))
+                except Exception:
+                    err_msg = f"HTTP Error {e.code}"
+                self.update_status(f"Error updating count: {err_msg}", 0)
+                self.root.after(0, lambda m=err_msg: messagebox.showerror("Error", f"Failed to update count: {m}"))
             except Exception as e:
                 self.update_status(f"Error updating system count: {e}", 0)
                 self.root.after(0, lambda err=str(e): messagebox.showerror("Error", f"Failed to update count: {err}"))
@@ -912,41 +918,17 @@ class IzanamiSyncApp:
                         f"✅ Successfully marked {count} boxel(s) as 'Doesn't Exist' (0/0 systems) on the survey portal!\n\n"
                         f"Pasted lines have been registered."
                     ))
+            except urllib.error.HTTPError as e:
+                try:
+                    err_body = json.loads(e.read().decode('utf-8'))
+                    err_msg = err_body.get("detail", str(e))
+                except Exception:
+                    err_msg = f"HTTP Error {e.code}"
+                self.update_status(f"Error logging non-existent boxels: {err_msg}", 0)
+                self.root.after(0, lambda m=err_msg: messagebox.showerror("Error", f"Failed to mark non-existent boxels: {m}"))
             except Exception as e:
                 self.update_status(f"Error logging non-existent boxels: {e}", 0)
                 self.root.after(0, lambda err=str(e): messagebox.showerror("Error", f"Failed to mark non-existent boxels: {err}"))
-
-        threading.Thread(target=_send, daemon=True).start()
-
-    def mark_current_boxel_not_exist(self):
-        boxel_str = self.current_boxel.get()
-        if not boxel_str or boxel_str == "None Detected":
-            messagebox.showwarning("No Boxel Detected", "Please detect or visit a boxel first.")
-            return
-
-        if not messagebox.askyesno("Confirm", f"Mark current boxel {boxel_str} as Non-Existent (Doesn't Exist, 0/0)?"):
-            return
-
-        key = self.api_key.get().strip()
-        url = self.server_url.get().strip().rstrip('/') + "/api/boxel/batch_not_exist"
-        payload = json.dumps({
-            "api_key": key,
-            "boxels": [boxel_str],
-            "assigned_cmdr": self.active_cmdr.get()
-        }).encode('utf-8')
-
-        def _send():
-            self.update_status(f"Marking {boxel_str} as Doesn't Exist...", 50)
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-            try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    res = json.loads(resp.read().decode('utf-8'))
-                    msg = res.get("msg", "Marked as Doesn't Exist.")
-                    self.update_status(f"✅ {msg}", 100)
-                    self.root.after(0, lambda: messagebox.showinfo("Success", f"✅ {boxel_str} marked as Doesn't Exist (0/0)!"))
-            except Exception as e:
-                self.update_status(f"Error: {e}", 0)
-                self.root.after(0, lambda err=str(e): messagebox.showerror("Error", f"Failed: {err}"))
 
         threading.Thread(target=_send, daemon=True).start()
 
@@ -1095,13 +1077,13 @@ class IzanamiSyncApp:
 
         sec, sub, mass, _ = parse_system_to_boxel(self.current_system.get())
         if not sec or not sub or not mass:
-            m = re.match(r"^(.*?)\s+([a-zA-Z]{2}-[a-zA-Z])\s+(.+)$", boxel_str)
+            m = re.match(r"^(.*?)\s+([a-zA-Z]{2}-[a-zA-Z])\s+([a-hA-H]\d*-?\d*)", boxel_str)
             if not m:
                 messagebox.showerror("Invalid Format", f"Unable to parse boxel: {boxel_str}")
                 return
-            sec = m.group(1).title()
-            sub = m.group(2).upper()
-            mass = m.group(3).upper()
+            sec = m.group(1).strip().title()
+            sub = m.group(2).strip().upper()
+            mass = m.group(3).strip().upper()
 
         key = self.api_key.get().strip()
         url = self.server_url.get().strip().rstrip('/') + "/api/journal/mark_complete"
@@ -1123,7 +1105,8 @@ class IzanamiSyncApp:
                 "sector_name": sec,
                 "subsector_code": sub,
                 "mass_code": mass,
-                "total_systems": tot_int
+                "total_systems": tot_int,
+                "assigned_cmdr": self.active_cmdr.get()
             }).encode('utf-8')
 
             req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
