@@ -33,7 +33,7 @@ except ImportError:
     HAVE_PYSTRAY = False
 
 CONFIG_FILE = os.path.expanduser("~/.izanami_journal_uploader.json")
-CURRENT_VERSION = "2.6.2"
+CURRENT_VERSION = "2.6.3"
 VERSION_CHECK_URL = "https://www.irishraven.com/api/version"
 
 # Canonical EDAstro 16-Point Boundary (Region #7 - Izanami)
@@ -468,14 +468,19 @@ class IzanamiSyncApp:
         try:
             candidates = []
             if platform.system() == "Windows":
+                prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+                prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+                local_app_data = os.environ.get("LOCALAPPDATA", "")
+
                 candidates = [
-                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-                    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
-                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                    os.path.join(prog_files_x86, "Microsoft", "Edge", "Application", "msedge.exe"),
+                    os.path.join(prog_files, "Microsoft", "Edge", "Application", "msedge.exe"),
+                    os.path.join(local_app_data, "Microsoft", "Edge", "Application", "msedge.exe"),
+                    os.path.join(prog_files, "Google", "Chrome", "Application", "chrome.exe"),
+                    os.path.join(prog_files_x86, "Google", "Chrome", "Application", "chrome.exe"),
+                    os.path.join(local_app_data, "Google", "Chrome", "Application", "chrome.exe"),
+                    os.path.join(prog_files, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                    os.path.join(local_app_data, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
                 ]
                 for name in ["msedge", "chrome", "brave"]:
                     p = shutil.which(name)
@@ -499,6 +504,18 @@ class IzanamiSyncApp:
                     opened = True
                     self.update_status("Launched 3D Boxel Explorer widget window.", 100)
                     break
+
+            if not opened and platform.system() == "Windows":
+                # Fallback to shell start with --app flag
+                for browser_cmd in ["msedge", "chrome", "brave"]:
+                    try:
+                        ret = subprocess.call(f'start {browser_cmd} --app="{url}"', shell=True)
+                        if ret == 0:
+                            opened = True
+                            self.update_status("Launched 3D Boxel Explorer widget window.", 100)
+                            break
+                    except Exception:
+                        pass
         except Exception:
             opened = False
 
@@ -808,7 +825,11 @@ class IzanamiSyncApp:
             return False, {"detail": "API Key is missing. Click ⚙ Settings to configure."}
 
         payload = json.dumps({"api_key": key, "events": events}).encode('utf-8')
-        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': f'IzanamiCompanion/{CURRENT_VERSION} (EliteDangerous Survey)'
+        }
+        req = urllib.request.Request(url, data=payload, headers=headers)
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -861,9 +882,14 @@ class IzanamiSyncApp:
             "assigned_cmdr": self.active_cmdr.get()
         }).encode('utf-8')
 
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': f'IzanamiCompanion/{CURRENT_VERSION} (EliteDangerous Survey)'
+        }
+
         def _update_count():
             self.update_status(f"Updating total system count for {sec} {sub} {mass} to {tot_int}...", 50)
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            req = urllib.request.Request(url, data=payload, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     res = json.loads(resp.read().decode('utf-8'))
@@ -890,10 +916,29 @@ class IzanamiSyncApp:
             messagebox.showwarning("Empty Input", "Please paste one or more boxel names in the text area first.")
             return
 
-        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        # Clean noise: remove headers like "Contained Boxels", separators, empty lines
+        lines = []
+        for line in raw_text.splitlines():
+            clean_l = line.strip()
+            if not clean_l:
+                continue
+            if re.match(r"^(contained boxels|current boxel|boxels?|sector|system|---|\=\=\=)", clean_l, re.IGNORECASE):
+                continue
+            lines.append(clean_l)
+
         if not lines:
-            messagebox.showwarning("Empty Input", "No valid boxel lines found.")
+            messagebox.showwarning("Empty Input", "No valid boxel lines found in pasted text.")
             return
+
+        # Determine default sector context from current system or current boxel
+        default_sec = "Cheethe"
+        sec, _, _, _ = parse_system_to_boxel(self.current_system.get())
+        if sec:
+            default_sec = sec
+        else:
+            m_sec = re.match(r"^(.*?)\s+([a-zA-Z]{2}-[a-zA-Z])", self.current_boxel.get())
+            if m_sec:
+                default_sec = m_sec.group(1).strip()
 
         key = self.api_key.get().strip()
         url = self.server_url.get().strip().rstrip('/') + "/api/boxel/batch_not_exist"
@@ -901,12 +946,18 @@ class IzanamiSyncApp:
         payload = json.dumps({
             "api_key": key,
             "boxels": lines,
+            "default_sector": default_sec,
             "assigned_cmdr": self.active_cmdr.get()
         }).encode('utf-8')
 
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': f'IzanamiCompanion/{CURRENT_VERSION} (EliteDangerous Survey)'
+        }
+
         def _send():
             self.update_status(f"Marking {len(lines)} boxels as Doesn't Exist (0/0)...", 50)
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            req = urllib.request.Request(url, data=payload, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     res = json.loads(resp.read().decode('utf-8'))
@@ -916,7 +967,7 @@ class IzanamiSyncApp:
                     self.root.after(0, lambda: messagebox.showinfo(
                         "Non-Existent Boxels Logged",
                         f"✅ Successfully marked {count} boxel(s) as 'Doesn't Exist' (0/0 systems) on the survey portal!\n\n"
-                        f"Pasted lines have been registered."
+                        f"Pasted boxel lines have been logged under sector '{default_sec}'."
                     ))
             except urllib.error.HTTPError as e:
                 try:
@@ -1109,7 +1160,11 @@ class IzanamiSyncApp:
                 "assigned_cmdr": self.active_cmdr.get()
             }).encode('utf-8')
 
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': f'IzanamiCompanion/{CURRENT_VERSION} (EliteDangerous Survey)'
+            }
+            req = urllib.request.Request(url, data=payload, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     res_data = json.loads(resp.read().decode('utf-8'))
